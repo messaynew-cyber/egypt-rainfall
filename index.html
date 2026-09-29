@@ -159,7 +159,7 @@ renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
 renderer.setSize(innerWidth, innerHeight);
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = 1.15;
+renderer.toneMappingExposure = 0.92;
 document.body.appendChild(renderer.domElement);
 
 const controls = new OrbitControls(camera, renderer.domElement);
@@ -226,8 +226,8 @@ scene.add(nileGroup);
 
   const tube = new THREE.Mesh(
     new THREE.TubeGeometry(curve, 160, NILE_R, 12, false),
-    new THREE.MeshStandardMaterial({ color:0x59d8ff, emissive:0x59d8ff,
-      emissiveIntensity:3.2, roughness:0.1, metalness:0.0,
+    new THREE.MeshStandardMaterial({ color:0x1d8fd6, emissive:0x1d8fd6,
+      emissiveIntensity:1.35, roughness:0.1, metalness:0.0,
       transparent:false }));
   tube.position.y = 0.45;
   nileGroup.add(tube);
@@ -235,16 +235,16 @@ scene.add(nileGroup);
   // additive halo — carries the "a river is here" signal at a glance
   const glow = new THREE.Mesh(
     new THREE.TubeGeometry(curve, 120, NILE_R*2.6, 10, false),
-    new THREE.MeshBasicMaterial({ color:0x1a9cff, transparent:true,
-      opacity:0.30, blending:THREE.AdditiveBlending, depthWrite:false }));
+    new THREE.MeshBasicMaterial({ color:0x0f6fc4, transparent:true,
+      opacity:0.22, blending:THREE.AdditiveBlending, depthWrite:false }));
   glow.position.y = 0.45;
   nileGroup.add(glow);
 
   // a wide, faint bloom bed so it reads at distance without looking like a snake
   const bed = new THREE.Mesh(
     new THREE.TubeGeometry(curve, 90, NILE_R*5.5, 8, false),
-    new THREE.MeshBasicMaterial({ color:0x0d6fb8, transparent:true,
-      opacity:0.14, blending:THREE.AdditiveBlending, depthWrite:false }));
+    new THREE.MeshBasicMaterial({ color:0x0a4f88, transparent:true,
+      opacity:0.11, blending:THREE.AdditiveBlending, depthWrite:false }));
   bed.position.y = 0.40;
   nileGroup.add(bed);
 
