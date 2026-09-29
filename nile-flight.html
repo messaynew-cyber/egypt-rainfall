@@ -1,0 +1,541 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>The Nile — Atmospheric Flight</title>
+<style>
+  html,body{margin:0;height:100%;overflow:hidden;background:#0a0806}
+  canvas{display:block;position:fixed;inset:0}
+  #hud{position:fixed;inset:0;pointer-events:none;
+    font:11px/1.6 ui-monospace,Menlo,monospace;color:#e8dcc8}
+  .tl{position:absolute;top:16px;left:16px;max-width:60%}
+  .tl h1{margin:0;font-size:13px;letter-spacing:.22em;text-transform:uppercase;
+    font-weight:400;color:#f0e2c8;text-shadow:0 2px 12px #000}
+  .tl p{margin:4px 0 0;font-size:10px;color:#a89880;text-shadow:0 1px 8px #000}
+  .br{position:absolute;bottom:16px;right:16px;text-align:right;font-size:10px;
+    color:#8d8068;text-shadow:0 1px 8px #000}
+  .alt{position:absolute;bottom:16px;left:16px;font-size:10px;color:#8d8068;
+    text-shadow:0 1px 8px #000}
+  #load{position:fixed;inset:0;background:#0a0806;z-index:99;display:flex;
+    align-items:center;justify-content:center;flex-direction:column;gap:12px;
+    transition:opacity 1.2s ease;font:11px/1.6 ui-monospace,monospace;color:#8d8068}
+  .bar{width:180px;height:2px;background:#231c14;overflow:hidden;border-radius:2px}
+  .bar i{display:block;height:100%;width:0%;background:#d9a441;transition:width .3s}
+  .ctl{position:absolute;bottom:16px;left:50%;transform:translateX(-50%);
+    display:flex;gap:6px;pointer-events:auto}
+  button{font:10px/1 ui-monospace,monospace;letter-spacing:.1em;text-transform:uppercase;
+    background:rgba(20,16,10,.55);color:#c8b896;border:1px solid rgba(200,184,150,.22);
+    padding:7px 11px;border-radius:20px;backdrop-filter:blur(8px);cursor:pointer}
+  button:active{background:rgba(217,164,65,.25);color:#f0d9a8}
+</style>
+</head>
+<body>
+<div id="load"><div>SYNTHESIZING TERRAIN</div><div class="bar"><i id="pb"></i></div></div>
+<div id="hud">
+  <div class="tl">
+    <h1>The Nile Valley</h1>
+    <p>30.0&deg;N 31.2&deg;E &mdash; atmospheric flight</p>
+  </div>
+  <div class="alt" id="alt">altitude &mdash;</div>
+  <div class="br" id="fps">&mdash;</div>
+  <div class="ctl">
+    <button id="b1">Auto</button>
+    <button id="b2">Golden Hour</button>
+    <button id="b3">Midday</button>
+    <button id="b4">Dusk</button>
+  </div>
+</div>
+<script type="importmap">
+{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+"three/addons/":"https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"}}
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+/* ══════════════════════════════════════════════════════════════════════
+   ATMOSPHERIC SCATTERING
+   Rayleigh (molecular, blue sky) + Mie (aerosol, haze/sun halo).
+   This is the single biggest realism lever — a 3-colour gradient sky
+   looks like CSS; real scattering looks like a photograph.
+   Simplified single-scatter model, precomputed per-frame in the shader.
+   ══════════════════════════════════════════════════════════════════════ */
+const SKY_VERT = `
+varying vec3 vWorld;
+void main(){
+  vWorld = (modelMatrix * vec4(position,1.0)).xyz;
+  gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0);
+}`;
+
+const SKY_FRAG = `
+varying vec3 vWorld;
+uniform vec3 uSunDir;
+uniform vec3 uSunColor;
+uniform float uTurbidity;   // dust load — high over the Sahara
+uniform float uRayleigh;    // molecular scatter strength
+uniform float uMie;         // aerosol scatter strength
+uniform float uHorizonMix;  // how much ground haze bleeds up
+
+// Rayleigh phase (symmetric-ish, blue-biased) + Cornette-Shanks Mie phase
+float rayleighPhase(float c){ return 0.0596831 * (1.0 + c*c); }
+float miePhase(float c, float g){
+  float g2 = g*g;
+  return (1.0-g2) / (4.0*3.14159265*pow(1.0+g2-2.0*g*c, 1.5));
+}
+
+void main(){
+  vec3 dir = normalize(vWorld);
+  float up = max(dir.y, -0.08);
+
+  // optical depth approximation — longer path near the horizon
+  float zenith = 1.0 / (up + 0.12);
+  vec3  od = vec3(0.650, 1.881, 0.085) * uRayleigh * zenith;
+  od += vec3(uMie) * uTurbidity * zenith * 0.28;
+
+  // transmittance per channel (Beer-Lambert)
+  vec3 trans = exp(-od);
+
+  float cosT = dot(dir, normalize(uSunDir));
+
+  vec3 rayl = vec3(0.180,0.420,1.000) * rayleighPhase(cosT) * uRayleigh;
+  vec3 mie  = uSunColor * miePhase(cosT, 0.76) * uMie * uTurbidity;
+
+  // scattering integral (cheap single-scatter stand-in)
+  vec3 scatter = (rayl * trans + mie) ;
+
+  // ground bounce — warm sand reflecting up into the lower sky
+  float groundMix = smoothstep(0.10, -0.08, up) * uHorizonMix;
+  vec3 ground = vec3(0.62,0.44,0.26) * uSunColor * 0.55;
+  scatter = mix(scatter, scatter*0.55 + ground*0.5, groundMix);
+
+  // sun disc + bloom
+  float sunDisc = smoothstep(0.99965, 0.99992, cosT);
+  float sunGlow = pow(max(cosT,0.0), 220.0) * 0.9
+                + pow(max(cosT,0.0), 12.0) * 0.10;
+  scatter += uSunColor * (sunDisc*14.0 + sunGlow);
+
+  // tonemap (ACES-ish) + slight desaturation to avoid neon
+  vec3 x = scatter;
+  x = (x*(2.51*x+0.03))/(x*(2.43*x+0.59)+0.14);
+  x = clamp(x, 0.0, 1.0);
+  x = mix(vec3(dot(x, vec3(0.2126,0.7152,0.0722))), x, 0.92);
+  gl_FragColor = vec4(x, 1.0);
+}`;
+
+/* ══════════════════════════════════════════════════════════════════════
+   TERRAIN — procedural fBm heightmap with domain warping.
+   Domain warp is what makes desert look like desert instead of a
+   sine-wave golf course. Absolute value noise for the dune ridges.
+   ══════════════════════════════════════════════════════════════════════ */
+const TERRAIN_VERT = `
+uniform float uTime;
+varying vec3 vPos;
+varying vec3 vNrm;
+varying vec2 vUv;
+varying float vSlope;
+
+// cheap hash / value noise
+float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7)))*43758.5453123); }
+float noise(vec2 p){
+  vec2 i = floor(p), f = fract(p);
+  vec2 u = f*f*(3.0-2.0*f);
+  return mix(mix(hash(i), hash(i+vec2(1,0)), u.x),
+             mix(hash(i+vec2(0,1)), hash(i+vec2(1,1)), u.x), u.y);
+}
+float fbm(vec2 p){
+  float v=0.0, a=0.5;
+  mat2 rot = mat2(0.80,0.60,-0.60,0.80);
+  for(int i=0;i<5;i++){ v += a*noise(p); p = rot*p*2.03; a *= 0.5; }
+  return v;
+}
+// ridged — sharp crests where noise crosses 0.5 (dune ridges / escarpments)
+float ridged(vec2 p){
+  float v=0.0, a=0.5;
+  mat2 rot = mat2(0.80,0.60,-0.60,0.80);
+  for(int i=0;i<4;i++){
+    float n = 1.0 - abs(noise(p)*2.0-1.0);
+    v += a*n*n; p = rot*p*2.07; a *= 0.5;
+  }
+  return v;
+}
+
+float height(vec2 p){
+  // domain warp — bends the noise field so ridges curve organically
+  vec2 q = vec2(fbm(p*0.9), fbm(p*0.9 + vec2(5.2,1.3)));
+  vec2 r = vec2(fbm(p*1.6 + 4.0*q + vec2(1.7,9.2)),
+                fbm(p*1.6 + 4.0*q + vec2(8.3,2.8)));
+  float base = fbm(p*0.55 + 3.2*r);
+  float dunes = ridged(p*2.6 + 1.7*r) * 0.30;
+  float macro = fbm(p*0.18) * 0.9;
+  return base*0.62 + dunes + macro;
+}
+
+void main(){
+  vec2 p = uv * 34.0;
+  float h = height(p);
+  vUv = uv;
+
+  // sun-tracking ripple micro-relief, slowly drifting
+  vec2 flow = vec2(uTime*0.0055, uTime*0.0022);
+  float ripple = sin((p.x*3.1 + flow.x*40.0)) * 0.006
+               + sin((p.y*2.7 - flow.y*30.0)) * 0.006;
+
+  vec3 pos = position;
+  pos.z += (h*2.4 + ripple);
+
+  // analytic-ish normal via finite differences
+  float e = 0.35;
+  float hL = height(p - vec2(e,0.0));
+  float hR = height(p + vec2(e,0.0));
+  float hD = height(p - vec2(0.0,e));
+  float hU = height(p + vec2(0.0,e));
+  vec3 n = normalize(vec3(hL-hR, hD-hU, e*2.0));
+
+  vSlope = 1.0 - n.z;
+  vNrm = normalize(normalMatrix * n);
+  vPos = pos;
+  gl_Position = projectionMatrix * modelViewMatrix * vec4(pos,1.0);
+}`;
+
+const TERRAIN_FRAG = `
+uniform vec3 uSunDir;
+uniform vec3 uSunColor;
+uniform vec3 uSkyColor;
+uniform float uAridity;   // 0 = Delta (lush), 1 = deep desert
+uniform float uRiverX;    // river centreline in local X
+uniform float uRiverW;    // half-width of the green strip
+uniform float uTime;
+varying vec3 vPos;
+varying vec3 vNrm;
+varying vec2 vUv;
+varying float vSlope;
+
+// ── procedural sand grain + cross-bedding, no texture files ──
+float grain(vec2 p){
+  float a = sin(p.x*180.0 + sin(p.y*140.0)*1.7);
+  float b = sin(p.y*210.0 + sin(p.x*160.0)*2.1);
+  return (a*b)*0.5+0.5;
+}
+
+void main(){
+  // ── ARIDITY FIELD: distance from the river ──
+  float dRiver = abs(vPos.x - uRiverX) / uRiverW;
+  float wet = 1.0 - smoothstep(0.55, 1.85, dRiver);   // 1 at river, 0 in desert
+  // the south is more arid for the same distance (real rainfall gradient)
+  float southness = smoothstep(-6.0, 18.0, vPos.y);
+  wet *= (1.0 - southness*0.72);
+  wet *= (1.0 - uAridity*0.55);
+
+  // ── sand albedo, warmer + paler where dry ──
+  vec3 sandDark = vec3(0.44,0.33,0.19);
+  vec3 sandLite = vec3(0.76,0.63,0.42);
+  vec3 sand = mix(sandDark, sandLite, clamp(vSlope*2.2 + 0.45,0.0,1.0));
+
+  // ── the cultivated strip: real irrigation, not rainfall ──
+  vec3 silt  = vec3(0.22,0.20,0.13);
+  vec3 crop  = vec3(0.20,0.34,0.11);
+  vec3 field = mix(silt, crop, 0.62 + 0.3*sin(vPos.y*0.9 + vPos.x*0.4));
+  vec3 albedo = mix(sand, field, wet*0.92);
+
+  // grain only shows on bare sand
+  float g = grain(vPos.xy*1.0);
+  albedo *= mix(1.0, 0.86+0.28*g, (1.0-wet)*0.85);
+
+  // ── lighting: key + fill from sky ──
+  vec3 N = normalize(vNrm);
+  float ndl = max(dot(N, uSunDir), 0.0);
+  vec3 diffuse = uSunColor * ndl;
+  vec3 ambient = uSkyColor * (0.34 + 0.30*N.z);
+  vec3 col = albedo * (diffuse + ambient);
+
+  // ── specular sheen on lit sand faces ──
+  vec3 V = normalize(cameraPosition - vPos);
+  vec3 H = normalize(uSunDir + V);
+  float spec = pow(max(dot(N,H),0.0), 28.0) * 0.16;
+  col += uSunColor * spec * (1.0-wet*0.7);
+
+  // ── aerial perspective: distance haze tinted by the sky ──
+  float dist = length(cameraPosition - vPos);
+  float haze = 1.0 - exp(-dist*0.0058);
+  col = mix(col, uSkyColor*0.92, haze*0.80);
+
+  gl_FragColor = vec4(col, 1.0);
+}`;
+
+/* ── WATER: Fresnel + ripples + sun glint. Not an emissive tube. ── */
+const WATER_FRAG = `
+uniform vec3 uSunDir;
+uniform vec3 uSunColor;
+uniform vec3 uSkyColor;
+uniform float uTime;
+varying vec3 vPos;
+varying vec3 vNrm;
+varying vec2 vUv;
+
+float hash(vec2 p){ return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453); }
+float noise(vec2 p){
+  vec2 i=floor(p), f=fract(p); vec2 u=f*f*(3.0-2.0*f);
+  return mix(mix(hash(i),hash(i+vec2(1,0)),u.x),
+             mix(hash(i+vec2(0,1)),hash(i+vec2(1,1)),u.x),u.y);
+}
+
+void main(){
+  // two crossing wave trains + fine chop
+  vec2 p = vUv * vec2(90.0, 26.0);
+  float w1 = sin(p.x*0.9 + uTime*0.55) * 0.5;
+  float w2 = sin(p.y*1.6 - uTime*0.42) * 0.5;
+  float chop = noise(p*3.1 + uTime*0.25) - 0.5;
+  vec3 n = normalize(vec3(w1*0.055 + chop*0.05, w2*0.048, 0.97));
+
+  vec3 V = normalize(cameraPosition - vPos);
+  float fres = pow(1.0 - max(dot(n, V), 0.0), 3.4);
+
+  // deep water absorbs — shallow near banks picks up silt
+  vec3 deep    = vec3(0.045,0.105,0.145);
+  vec3 shallow = vec3(0.145,0.175,0.145);
+  vec3 body = mix(deep, shallow, smoothstep(0.0,0.42,vUv.x) * smoothstep(1.0,0.58,vUv.x));
+
+  vec3 refl = uSkyColor * 1.06;
+  vec3 col = mix(body, refl, clamp(fres*1.25,0.0,1.0));
+
+  // specular sun glint — tight, animated
+  vec3 H = normalize(uSunDir + V);
+  float spec = pow(max(dot(n,H),0.0), 620.0);
+  col += uSunColor * spec * 3.4;
+
+  // broad shimmer
+  float shimmer = pow(max(dot(n,H),0.0), 42.0) * 0.20;
+  col += uSunColor * shimmer;
+
+  gl_FragColor = vec4(col, 0.90);
+}`;
+
+/* ══════════════ SCENE SETUP ══════════════ */
+const renderer = new THREE.WebGLRenderer({ antialias:true, powerPreference:'high-performance' });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 1.75));
+renderer.setSize(innerWidth, innerHeight);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.0;
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(52, innerWidth/innerHeight, 0.5, 900);
+
+/* ── sun & sky ── */
+const sunDir = new THREE.Vector3(0.42, 0.135, -0.90).normalize();  // low golden hour
+const sunColor = new THREE.Color(0xffd9a0).multiplyScalar(1.5);
+
+const skyMat = new THREE.ShaderMaterial({
+  vertexShader: SKY_VERT, fragmentShader: SKY_FRAG,
+  side: THREE.BackSide, depthWrite:false,
+  uniforms:{
+    uSunDir:{value:sunDir}, uSunColor:{value:sunColor},
+    uTurbidity:{value:2.35}, uRayleigh:{value:1.45},
+    uMie:{value:0.42}, uHorizonMix:{value:0.62}
+  }
+});
+const sky = new THREE.Mesh(new THREE.SphereGeometry(420, 40, 28), skyMat);
+scene.add(sky);
+
+/* ── terrain ── */
+const RIVER_X = 0.0, RIVER_W = 3.6;
+const terrainMat = new THREE.ShaderMaterial({
+  vertexShader: TERRAIN_VERT, fragmentShader: TERRAIN_FRAG,
+  uniforms:{
+    uTime:{value:0}, uSunDir:{value:sunDir}, uSunColor:{value:sunColor},
+    uSkyColor:{value:new THREE.Color(0x9fc0dc)},
+    uAridity:{value:0.35}, uRiverX:{value:RIVER_X}, uRiverW:{value:RIVER_W}
+  }
+});
+const terrain = new THREE.Mesh(new THREE.PlaneGeometry(64, 150, 240, 380), terrainMat);
+terrain.rotation.x = -Math.PI/2;
+terrain.position.y = 0;
+scene.add(terrain);
+
+/* ── the river: a gently meandering ribbon, not a straight tube ── */
+function riverCenter(t){          // t: 0..1 along its length
+  return Math.sin(t*5.4)*5.4 + Math.sin(t*13.1)*1.35;
+}
+{
+  const SEG = 400, HALF = 0.62;
+  const g = new THREE.BufferGeometry();
+  const pos=[], uv=[], idx=[];
+  for (let i=0;i<=SEG;i++){
+    const t = i/SEG;
+    const y = -68 + t*136;
+    const x = riverCenter(t);
+    pos.push(x-HALF, 0.30, y,  x+HALF, 0.30, y);
+    uv.push(0, t,  1, t);
+  }
+  for (let i=0;i<SEG;i++){
+    const a=i*2, b=i*2+1, c=i*2+2, d=i*2+3;
+    idx.push(a,c,b,  b,c,d);
+  }
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos,3));
+  g.setAttribute('uv',       new THREE.Float32BufferAttribute(uv,2));
+  g.setAttribute('normal',   new THREE.Float32BufferAttribute(
+      new Array((SEG+1)*2).fill(0).flatMap(()=>[0,1,0]), 3));
+  g.setIndex(idx);
+
+  const waterMat = new THREE.ShaderMaterial({
+    vertexShader:`varying vec3 vPos; varying vec3 vNrm; varying vec2 vUv;
+      void main(){ vUv=uv; vPos=(modelMatrix*vec4(position,1.0)).xyz;
+        vNrm=normalize(normalMatrix*normal);
+        gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }`,
+    fragmentShader: WATER_FRAG,
+    uniforms:{ uTime:{value:0}, uSunDir:{value:sunDir},
+      uSunColor:{value:sunColor}, uSkyColor:{value:new THREE.Color(0xbcd8f0)} },
+    transparent:true
+  });
+  const river = new THREE.Mesh(g, waterMat);
+  scene.add(river);
+  window.__water = waterMat;
+}
+
+/* ── distant plateau silhouette (Gilf Kebir / escarpment) ── */
+{
+  const g = new THREE.PlaneGeometry(340, 26, 60, 6);
+  const p = g.attributes.position;
+  for (let i=0;i<p.count;i++){
+    const x=p.getX(i), y=p.getY(i);
+    const h = Math.abs(Math.sin(x*0.021)*4.4 + Math.sin(x*0.055+1.8)*2.3
+              + Math.sin(x*0.11)*0.9);
+    p.setZ(i, h * (1 - Math.abs(y)/(26/2)*0.35));
+  }
+  g.computeVertexNormals();
+  const m = new THREE.MeshStandardMaterial({ color:0x6b5537, roughness:1, metalness:0,
+    transparent:true, opacity:0.96, flatShading:true });
+  const plate = new THREE.Mesh(g, m);
+  plate.position.set(-38, 5.5, -86);
+  plate.rotation.y = 0.30;
+  scene.add(plate);
+
+  const plate2 = plate.clone();
+  plate2.position.set(46, 4.2, -78);
+  plate2.rotation.y = -0.42;
+  plate2.scale.set(0.82, 0.72, 1);
+  scene.add(plate2);
+}
+
+/* ── sunset presets ── */
+const PRESETS = {
+  golden: { turb:2.35, ray:1.45, mie:0.42, horizon:0.62,
+            sun:[0.42,0.135,-0.90], col:0xffd9a0, exp:1.00, aridity:0.35,
+            sky:0x9fc0dc, wat:0xbcd8f0 },
+  midday: { turb:1.10, ray:1.00, mie:0.20, horizon:0.34,
+            sun:[0.30,0.92,-0.25], col:0xfff4e0, exp:0.78, aridity:0.55,
+            sky:0xa8c8e8, wat:0xc8dcf0 },
+  dusk:   { turb:3.40, ray:1.90, mie:0.68, horizon:0.80,
+            sun:[0.62,0.055,-0.78], col:0xff8a4a, exp:1.06, aridity:0.42,
+            sky:0x6a86a8, wat:0x8aa8c8 }
+};
+function applyPreset(k){
+  const P = PRESETS[k];
+  skyMat.uniforms.uTurbidity.value = P.turb;
+  skyMat.uniforms.uRayleigh.value  = P.ray;
+  skyMat.uniforms.uMie.value       = P.mie;
+  skyMat.uniforms.uHorizonMix.value= P.horizon;
+  sunDir.set(P.sun[0],P.sun[1],P.sun[2]).normalize();
+  sunColor.setHex(P.col).multiplyScalar(k==='midday'?1.25:1.5);
+  renderer.toneMappingExposure = P.exp;
+  terrainMat.uniforms.uAridity.value = P.aridity;
+  terrainMat.uniforms.uSkyColor.value.setHex(P.sky);
+  window.__water.uniforms.uSkyColor.value.setHex(P.wat);
+}
+
+/* ── flight path: slow banking flyover of the valley ── */
+let flightT = 0.0, auto = true;
+const camTarget = new THREE.Vector3();
+const camPos = new THREE.Vector3();
+
+function flightUpdate(dt){
+  if (auto) flightT += dt * 0.0125;
+  const t = (flightT % 1.0);
+
+  // altitude profile: descend into the valley, then rise
+  const alt = 15.5 + Math.sin(t*Math.PI*2.0)*7.0 + Math.sin(t*Math.PI*5.0)*1.6;
+  const lateral = Math.sin(t*Math.PI*2.0 + 0.9) * 13.0;
+  const ahead   = t*136 - 68;
+
+  camPos.set(riverCenter((ahead+68)/136)*0.55 + lateral*0.42,
+             alt,
+             ahead - 34);
+  camTarget.set(riverCenter((ahead+68)/136),
+                Math.sin(t*3.1)*1.2,
+                ahead + 16);
+
+  camera.position.lerp(camPos, 0.055);
+  camera.lookAt(camTarget);
+
+  // subtle bank roll for cinematic feel
+  camera.rotation.z = Math.sin(t*Math.PI*2.0)*0.055;
+}
+
+/* ── boot ── */
+applyPreset('golden');
+
+let last = performance.now(), frames = 0, fpsT = 0;
+function loop(now){
+  const dt = Math.min((now-last)/1000, 0.05); last = now;
+
+  terrainMat.uniforms.uTime.value += dt;
+  window.__water.uniforms.uTime.value += dt;
+
+  // sky follows the camera so it never clips
+  sky.position.copy(camera.position);
+  // and the sun direction is anchored to the world, not the camera
+  skyMat.uniforms.uSunDir.value.copy(sunDir);
+  terrainMat.uniforms.uSunDir.value.copy(sunDir);
+  window.__water.uniforms.uSunDir.value.copy(sunDir);
+
+  flightUpdate(dt);
+  renderer.render(scene, camera);
+
+  frames++; fpsT += dt;
+  if (fpsT > 0.5){
+    document.getElementById('fps').textContent = Math.round(frames/fpsT) + ' fps';
+    const t = flightT % 1.0;
+    document.getElementById('alt').textContent =
+      'altitude ' + (15.5 + Math.sin(t*Math.PI*2.0)*7.0).toFixed(1) + ' u';
+    frames = 0; fpsT = 0;
+  }
+  requestAnimationFrame(loop);
+}
+
+document.getElementById('b1').onclick = e => {
+  auto = !auto; e.target.style.color = auto ? '#f0d9a8' : '#c8b896';
+};
+document.getElementById('b2').onclick = () => applyPreset('golden');
+document.getElementById('b3').onclick = () => applyPreset('midday');
+document.getElementById('b4').onclick = () => applyPreset('dusk');
+
+// drag to look around manually
+let dragging=false, px=0, py=0;
+addEventListener('pointerdown', e => { dragging=true; px=e.clientX; py=e.clientY; auto=false; });
+addEventListener('pointerup',   () => { dragging=false; });
+addEventListener('pointermove', e => {
+  if(!dragging) return;
+  const dx=e.clientX-px, dy=e.clientY-py; px=e.clientX; py=e.clientY;
+  camera.rotation.y -= dx*0.0016;
+  camera.rotation.x = Math.max(-0.5, Math.min(0.2, camera.rotation.x - dy*0.0012));
+});
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// hide loader after first real frames
+setTimeout(()=>{
+  const l=document.getElementById('load');
+  document.getElementById('pb').style.width='100%';
+  setTimeout(()=>{ l.style.opacity='0'; setTimeout(()=>l.remove(),1300); }, 260);
+}, 40);
+
+camera.position.set(0, 24, -70);
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
