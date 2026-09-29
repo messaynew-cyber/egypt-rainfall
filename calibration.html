@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Terrain Lighting Calibration</title>
+<style>
+:root{--bg:#0a0d14;--panel:#121826;--line:#1e2a3d;--txt:#dfeaf5;--dim:#7d93ab;--acc:#4dd2ff;--bad:#ff4d4d;--ok:#3ddc84}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--txt);font:13px/1.6 ui-monospace,Menlo,monospace;padding:14px}
+h1{font-size:15px;letter-spacing:.12em;text-transform:uppercase;color:var(--acc);margin:0 0 4px}
+.sub{color:var(--dim);font-size:11px;margin-bottom:14px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:14px;overflow:hidden}
+.hd{padding:10px 12px;border-bottom:1px solid var(--line)}
+.tt{font-size:12px;font-weight:700;letter-spacing:.06em}
+.verdict{font-size:10px;margin-top:2px}
+.before .tt{color:var(--bad)} .before .verdict{color:var(--bad)}
+.after  .tt{color:var(--ok)}  .after  .verdict{color:var(--ok)}
+canvas{display:block;width:100%;height:180px}
+.sw{padding:10px 12px;font-size:10px;color:var(--dim);border-top:1px solid var(--line)}
+.chips{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}
+.chip{padding:3px 8px;border-radius:999px;font-size:9px;border:1px solid var(--line)}
+.mono{color:var(--txt)}
+table{width:100%;border-collapse:collapse;margin-top:14px;font-size:11px}
+td,th{padding:7px 9px;border-bottom:1px solid var(--line);text-align:left}
+th{color:var(--acc);font-size:10px;letter-spacing:.08em;text-transform:uppercase}
+.swatch{display:inline-block;width:34px;height:14px;border-radius:4px;vertical-align:middle;border:1px solid #333}
+.note{background:#121826;border:1px solid var(--line);border-left:3px solid var(--acc);
+  border-radius:8px;padding:12px;margin-top:14px;font-size:11px;color:var(--dim)}
+.note b{color:var(--txt)}
+</style></head>
+<body>
+<h1>Terrain Lighting Calibration</h1>
+<div class="sub">Same geometry, same lights. Only the albedo and shading mode change. This is the whole bug.</div>
+
+<div class="grid">
+  <div class="card before">
+    <div class="hd"><div class="tt">BEFORE &mdash; what you saw</div>
+      <div class="verdict">&#10007; black terrain &middot; flatShading ON &middot; fog darker than ground</div></div>
+    <canvas id="c1"></canvas>
+    <div class="sw">
+      <div>albedo <span class="mono">0x2a2016</span> <span class="swatch" style="background:#2a2016"></span></div>
+      <div>fog <span class="mono">0x05070d</span> exp2 0.017 <span class="swatch" style="background:#05070d"></span></div>
+      <div class="chips"><span class="chip">hemi 0.55</span><span class="chip">sun 1.15</span>
+        <span class="chip">fill 0.35</span><span class="chip">no tonemap</span><span class="chip">flat shading</span></div>
+    </div>
+  </div>
+
+  <div class="card after">
+    <div class="hd"><div class="tt">AFTER &mdash; the fix</div>
+      <div class="verdict">&#10003; sand reads as sand &middot; dunes have relief &middot; horizon visible</div></div>
+    <canvas id="c2"></canvas>
+    <div class="sw">
+      <div>albedo <span class="mono">0x8a7350</span> <span class="swatch" style="background:#8a7350"></span></div>
+      <div>fog <span class="mono">0x1a1712</span> exp2 0.0125 <span class="swatch" style="background:#1a1712"></span></div>
+      <div class="chips"><span class="chip">hemi 1.15</span><span class="chip">sun 2.4</span>
+        <span class="chip">fill 0.85</span><span class="chip">rim 0.9</span>
+        <span class="chip">ACES</span><span class="chip">sRGB</span><span class="chip">smooth shading</span></div>
+    </div>
+  </div>
+</div>
+
+<table>
+<tr><th>Parameter</th><th>Before</th><th>After</th><th>Why it mattered</th></tr>
+<tr><td>Terrain albedo</td><td><span class="swatch" style="background:#2a2016"></span> 0x2a2016</td>
+    <td><span class="swatch" style="background:#8a7350"></span> 0x8a7350</td>
+    <td>16% reflectance &times; dim light collapsed to black. Sand is ~45%.</td></tr>
+<tr><td>Flat shading</td><td>ON</td><td>OFF</td>
+    <td>Flat shading killed normal interpolation &mdash; the dune ripples cast no gradient.</td></tr>
+<tr><td>Fog vs ground</td><td>fog <i>darker</i> than ground</td><td>fog 0x1a1712</td>
+    <td>Darker fog swallowed the horizon into the void.</td></tr>
+<tr><td>Tone mapping</td><td>none</td><td>ACES 1.15</td>
+    <td>Without a filmic curve, mid-darks crush to pure black.</td></tr>
+<tr><td>Colour space</td><td>unset</td><td>sRGB</td>
+    <td>Linear output drained saturation from everything.</td></tr>
+</table>
+
+<div class="note">
+<b>The lesson:</b> this was not a WebGL failure, a CORS problem, a CDN problem, or the phone's GPU refusing to cooperate.
+The code ran perfectly. It faithfully rendered a nearly-black material under dim light with the horizon fogged out.
+<b>A correct render of a bad art direction is a black screen.</b> Always look at the albedo and the light budget before blaming the device.
+</div>
+
+<script type="importmap">
+{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js"}}
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+function build(id, cfg){
+  const cv = document.getElementById(id);
+  const W = cv.clientWidth, H = 180;
+  const r = new THREE.WebGLRenderer({canvas:cv, antialias:true});
+  r.setPixelRatio(Math.min(devicePixelRatio,2));
+  r.setSize(W,H,false);
+  if (cfg.srgb) r.outputColorSpace = THREE.SRGBColorSpace;
+  if (cfg.aces){ r.toneMapping = THREE.ACESFilmicToneMapping; r.toneMappingExposure = 1.15; }
+
+  const s = new THREE.Scene();
+  s.background = new THREE.Color(cfg.bg);
+  if (cfg.fog) s.fog = new THREE.FogExp2(cfg.fogCol, cfg.fogD);
+  const cam = new THREE.PerspectiveCamera(50, W/H, .1, 300);
+  cam.position.set(0, 11, 15); cam.lookAt(0,0,0);
+
+  if (!cfg.aces) {
+    s.add(new THREE.HemisphereLight(0x8fd0ff, 0x201510, cfg.hemi));
+  } else {
+    s.add(new THREE.HemisphereLight(0xa8dcff, 0x4a3a28, cfg.hemi));
+  }
+  const sun = new THREE.DirectionalLight(cfg.sunCol, cfg.sun);
+  sun.position.set(9,17,8); s.add(sun);
+  const fill = new THREE.DirectionalLight(cfg.fillCol, cfg.fill);
+  fill.position.set(-11,5,-9); s.add(fill);
+  if (cfg.rim > 0){
+    const rim = new THREE.DirectionalLight(0xffb070, cfg.rim);
+    rim.position.set(-14,4,13); s.add(rim);
+  }
+
+  const g = new THREE.PlaneGeometry(34,22,52,34);
+  const p = g.attributes.position;
+  for (let i=0;i<p.count;i++){
+    const x=p.getX(i), y=p.getY(i);
+    p.setZ(i, Math.sin(x*.34)*.42 + Math.cos(y*.45)*.3 + Math.sin((x+y)*.14)*.7);
+  }
+  g.computeVertexNormals();
+  const ground = new THREE.Mesh(g, new THREE.MeshStandardMaterial({
+    color:cfg.col, roughness:0.95, metalness:0.02, flatShading:cfg.flat }));
+  ground.rotation.x = -Math.PI/2; s.add(ground);
+
+  // a single reference pillar so you can judge contrast/readability
+  const pillar = new THREE.Mesh(new THREE.CylinderGeometry(.35,.45,7,12),
+    new THREE.MeshStandardMaterial({color:0x4dd2ff, emissive:0x4dd2ff, emissiveIntensity:.6,
+      roughness:.3, metalness:.5}));
+  pillar.position.set(-4,3.5,1); s.add(pillar);
+  const pillar2 = new THREE.Mesh(new THREE.CylinderGeometry(.35,.45,1.1,12),
+    new THREE.MeshStandardMaterial({color:0xff4d4d, emissive:0xff4d4d, emissiveIntensity:.6,
+      roughness:.3, metalness:.5}));
+  pillar2.position.set(6,.55,1); s.add(pillar2);
+
+  r.render(s,cam);
+  addEventListener('resize',()=>{
+    const w=cv.clientWidth; r.setSize(w,H,false);
+    cam.aspect=w/H; cam.updateProjectionMatrix(); r.render(s,cam);
+  });
+}
+
+const BASE = {
+  bg:0x070b14, fog:true, fogCol:0x1a1712, fogD:0.0125,
+  col:0x8a7350, flat:false, hemi:1.15,
+  sunCol:0xffe8c0, sun:2.4, fillCol:0x6a9cff, fill:0.85, rim:0.9,
+  aces:true, srgb:true
+};
+
+build('c1', {...BASE, bg:0x05070d, fogCol:0x05070d, fogD:0.017,
+  col:0x2a2016, flat:true, hemi:0.55, sunCol:0xfff0d0, sun:1.15,
+  fillCol:0x3a6cff, fill:0.35, rim:0, aces:false, srgb:false});
+
+build('c2', BASE);
+</script>
+</body></html>
