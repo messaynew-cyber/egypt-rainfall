@@ -1,0 +1,410 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Egypt - Rainfall Reality</title>
+<style>
+  :root{--bg:#05070d;--panel:rgba(12,18,30,.72);--line:rgba(120,200,255,.16);
+    --txt:#dfeaf5;--dim:#7d93ab;--acc:#4dd2ff;--gold:#ffce54}
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html,body{margin:0;height:100%;overflow:hidden;background:var(--bg);
+    font-family:ui-monospace,Menlo,"JetBrains Mono",monospace;color:var(--txt)}
+  canvas{display:block;position:fixed;inset:0}
+  .hud{position:fixed;inset:0;pointer-events:none;padding:14px;display:flex;
+    flex-direction:column;justify-content:space-between}
+  .card{pointer-events:auto;background:var(--panel);border:1px solid var(--line);
+    border-radius:14px;padding:12px 14px;backdrop-filter:blur(14px);max-width:560px}
+  h1{margin:0 0 4px;font-size:14px;letter-spacing:.14em;text-transform:uppercase;color:var(--acc)}
+  .sub{font-size:11px;color:var(--dim);line-height:1.5}
+  .readout{margin-top:10px;font-size:12px;line-height:1.6}
+  .bar{height:7px;border-radius:4px;background:rgba(255,255,255,.07);overflow:hidden;margin:5px 0 9px}
+  .bar i{display:block;height:100%;border-radius:4px;transition:width .5s ease}
+  .ctl{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+  button{pointer-events:auto;font:inherit;font-size:11px;letter-spacing:.06em;
+    background:rgba(77,210,255,.09);color:var(--acc);border:1px solid rgba(77,210,255,.35);
+    padding:8px 12px;border-radius:9px;cursor:pointer;text-transform:uppercase}
+  button:active{background:rgba(77,210,255,.22)}
+  button.on{background:rgba(255,206,84,.18);color:var(--gold);border-color:rgba(255,206,84,.5)}
+  .legend{position:fixed;left:14px;top:50%;transform:translateY(-50%);font-size:10px;
+    color:var(--dim);line-height:2.1;background:var(--panel);border:1px solid var(--line);
+    border-radius:12px;padding:10px 12px;backdrop-filter:blur(14px)}
+  .dot{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:6px;vertical-align:middle}
+</style>
+</head>
+<body>
+<div class="hud">
+  <div class="card">
+    <h1>Egypt - Annual Rainfall</h1>
+    <div class="sub">Real climate normals. Pillar height = mm/yr. Cairo is the <b>wet</b> part.</div>
+    <div class="readout">
+      <div style="color:var(--dim);font-size:10px" id="range">loading</div>
+      <div class="bar"><i id="b1" style="width:0%;background:var(--acc)"></i></div>
+      <div id="stats"></div>
+    </div>
+  </div>
+  <div class="card">
+    <div class="ctl">
+      <button id="cycle">&#9654; Cycle Year</button>
+      <button id="rain" class="on">Rain: ON</button>
+      <button id="nile" class="on">Nile: ON</button>
+    </div>
+    <div class="sub" style="margin-top:8px" id="tick">t = day 0 - the sky has entered its natural state: nothing.</div>
+  </div>
+</div>
+<div class="legend" id="legend"></div>
+<script type="importmap">
+{"imports":{
+  "three":"https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/":"https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+}}
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+/* CLIMATE DATA - annual precipitation normals (mm/yr) */
+const CITIES = [
+  { n:'Alexandria', lat:31.20, lon:29.92, mm:180, col:0x3ddc84 },
+  { n:'Port Said',  lat:31.26, lon:32.30, mm: 90, col:0x4dd2ff },
+  { n:'Cairo',      lat:30.04, lon:31.24, mm: 25, col:0xffce54 },
+  { n:'Fayoum',     lat:29.31, lon:30.84, mm: 12, col:0xffa94d },
+  { n:'Asyut',      lat:27.18, lon:31.18, mm:  2, col:0xff8a5c },
+  { n:'Luxor',      lat:25.69, lon:32.64, mm:  1, col:0xff6b4a },
+  { n:'Aswan',      lat:24.09, lon:32.90, mm:  0, col:0xff4d4d }
+];
+const MAX_MM = 180;
+
+/* rain events/yr derived from totals.
+   Coast = many small winter drizzles. Upper Egypt = rare violent bursts. */
+const EVENTS = [
+  { n:'Alexandria', ev:22, kind:'steady' },
+  { n:'Port Said',  ev:12, kind:'steady' },
+  { n:'Cairo',      ev: 4, kind:'steady' },
+  { n:'Fayoum',     ev: 2, kind:'steady' },
+  { n:'Asyut',      ev: 1, kind:'steady' },
+  { n:'Luxor',      ev: 1, kind:'flash'  },
+  { n:'Aswan',      ev: 0, kind:'none'   }
+];
+
+const LON0=24.5, LON1=36.5, LAT0=21.5, LAT1=32.0;
+const W=22, H=13;
+const px = lon => (lon-LON0)/(LON1-LON0)*W - W/2;
+const pz = lat => -(lat-LAT0)/(LAT1-LAT0)*H + H/2;
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x05070d);
+scene.fog = new THREE.FogExp2(0x05070d, 0.017);
+
+const camera = new THREE.PerspectiveCamera(48, innerWidth/innerHeight, 0.1, 400);
+camera.position.set(0, 26, 26);
+
+const renderer = new THREE.WebGLRenderer({ antialias:true, powerPreference:'high-performance' });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.set(0, 0, 2);
+controls.enableDamping = true;
+controls.dampingFactor = 0.07;
+controls.minDistance = 8;
+controls.maxDistance = 55;
+controls.maxPolarAngle = Math.PI * 0.49;
+
+scene.add(new THREE.HemisphereLight(0x8fd0ff, 0x201510, 0.55));
+const sun = new THREE.DirectionalLight(0xfff0d0, 1.15);
+sun.position.set(14, 26, 12);
+scene.add(sun);
+const fill = new THREE.DirectionalLight(0x3a6cff, 0.35);
+fill.position.set(-16, 8, -14);
+scene.add(fill);
+
+/* desert ground with dunes */
+{
+  const g = new THREE.PlaneGeometry(W+16, H+16, 60, 40);
+  const pos = g.attributes.position;
+  for (let i=0;i<pos.count;i++){
+    const x=pos.getX(i), y=pos.getY(i);
+    const dune = Math.sin(x*0.32)*0.28 + Math.cos(y*0.41)*0.22 + Math.sin((x+y)*0.13)*0.5;
+    pos.setZ(i, dune + (Math.abs(x)>W*0.52 ? 1.6 : 0));
+  }
+  g.computeVertexNormals();
+  const ground = new THREE.Mesh(g, new THREE.MeshStandardMaterial({
+    color:0x2a2016, roughness:1, metalness:0, flatShading:true }));
+  ground.rotation.x = -Math.PI/2;
+  scene.add(ground);
+
+  const grid = new THREE.GridHelper(W+16, 26, 0x1b4a63, 0x12293a);
+  grid.position.y = 0.62;
+  grid.material.transparent = true; grid.material.opacity = 0.28;
+  scene.add(grid);
+}
+
+/* the Nile - the only reason this country exists */
+const nileGroup = new THREE.Group();
+scene.add(nileGroup);
+{
+  const pts = [
+    new THREE.Vector3(px(31.0), 0.05, pz(21.7)),
+    new THREE.Vector3(px(31.2), 0.05, pz(24.1)),
+    new THREE.Vector3(px(32.9), 0.05, pz(24.9)),
+    new THREE.Vector3(px(32.7), 0.05, pz(26.5)),
+    new THREE.Vector3(px(31.9), 0.05, pz(28.2)),
+    new THREE.Vector3(px(31.3), 0.05, pz(30.1)),
+    new THREE.Vector3(px(30.9), 0.05, pz(31.3)),
+    new THREE.Vector3(px(31.1), 0.05, pz(31.9))
+  ];
+  const curve = new THREE.CatmullRomCurve3(pts);
+  const tube = new THREE.Mesh(
+    new THREE.TubeGeometry(curve, 120, 0.34, 8, false),
+    new THREE.MeshStandardMaterial({ color:0x1ea5ff, emissive:0x0b6ba8,
+      emissiveIntensity:1.5, roughness:0.25, metalness:0.35,
+      transparent:true, opacity:0.95 }));
+  nileGroup.add(tube);
+
+  const delta = new THREE.Mesh(
+    new THREE.CircleGeometry(3.4, 6),
+    new THREE.MeshStandardMaterial({ color:0x1a8fd0, emissive:0x0a5580,
+      emissiveIntensity:1.1, transparent:true, opacity:0.5,
+      roughness:0.4, side:THREE.DoubleSide }));
+  delta.rotation.x = -Math.PI/2;
+  delta.rotation.z = 0.16;
+  delta.position.set(px(31.1), 0.06, pz(30.6));
+  delta.scale.set(1.15, 0.72, 1);
+  nileGroup.add(delta);
+}
+
+/* city markers - pillar height IS the rainfall */
+const cityMap = {};
+const barGroup = new THREE.Group();
+scene.add(barGroup);
+
+CITIES.forEach(c => {
+  const x = px(c.lon), z = pz(c.lat);
+  const grp = new THREE.Group();
+  grp.position.set(x, 0.62, z);
+
+  const h = Math.max(0.35, (c.mm / MAX_MM) * 9);
+  const pillar = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.16, 0.22, h, 10),
+    new THREE.MeshStandardMaterial({ color:c.col, emissive:c.col,
+      emissiveIntensity:0.7, roughness:0.3, metalness:0.5,
+      transparent:true, opacity:0.9 }));
+  pillar.position.y = h/2;
+  grp.add(pillar);
+
+  const disc = new THREE.Mesh(new THREE.CircleGeometry(0.55, 24),
+    new THREE.MeshBasicMaterial({ color:c.col, transparent:true,
+      opacity:0.28, side:THREE.DoubleSide }));
+  disc.rotation.x = -Math.PI/2;
+  disc.position.y = 0.02;
+  grp.add(disc);
+
+  const cv = document.createElement('canvas');
+  cv.width = 512; cv.height = 128;
+  const ctx = cv.getContext('2d');
+  ctx.textAlign = 'center';
+  ctx.shadowColor = '#000'; ctx.shadowBlur = 12;
+  ctx.font = 'bold 56px ui-monospace, monospace';
+  ctx.fillStyle = '#e8f4ff';
+  ctx.fillText(c.n.toUpperCase(), 256, 60);
+  ctx.font = '40px ui-monospace, monospace';
+  ctx.fillStyle = c.mm === 0 ? '#ff4d4d' : ('#'+c.col.toString(16).padStart(6,'0'));
+  ctx.fillText(c.mm + ' mm/yr', 256, 108);
+
+  const tex = new THREE.CanvasTexture(cv);
+  tex.minFilter = THREE.LinearFilter;
+  const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map:tex,
+    transparent:true, depthTest:false }));
+  sp.scale.set(3.1, 0.78, 1);
+  sp.position.y = h + 0.75;
+  grp.add(sp);
+
+  barGroup.add(grp);
+  cityMap[c.n] = { grp, pillar, h, x, z, col:c.col, mm:c.mm };
+});
+
+/* rain particle clouds - one per city, rate scales with event count */
+const rainSystems = [];
+
+EVENTS.forEach(e => {
+  const c = cityMap[e.n];
+  if (!c || e.ev === 0) return;
+
+  const count = e.kind === 'flash' ? 260 : Math.min(900, 60 + e.ev * 34);
+  const pos = new Float32Array(count * 3);
+  const vel = new Float32Array(count);
+  const spread = e.kind === 'flash' ? 1.5 : 2.4;
+  const startY = e.kind === 'flash' ? 17 : 13;
+
+  for (let i=0;i<count;i++){
+    pos[i*3]   = c.x + (Math.random()-0.5)*spread;
+    pos[i*3+1] = Math.random() * startY;
+    pos[i*3+2] = c.z + (Math.random()-0.5)*spread;
+    vel[i] = 6 + Math.random()*9;
+  }
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+
+  const pts = new THREE.Points(geo, new THREE.PointsMaterial({
+    color: e.kind === 'flash' ? 0xfff2c0 : 0x9fdcff,
+    size: e.kind === 'flash' ? 0.16 : 0.1,
+    transparent:true, opacity: e.kind === 'flash' ? 0.95 : 0.7,
+    depthWrite:false, blending:THREE.AdditiveBlending, sizeAttenuation:true }));
+  pts.visible = false;
+  scene.add(pts);
+
+  rainSystems.push({ pts, pos, vel, count, city:c, x:c.x, z:c.z, spread,
+    kind:e.kind, ev:e.ev, startY, attrs:geo.attributes.position, drops:0 });
+
+  const ring = new THREE.Mesh(new THREE.RingGeometry(0.72, 0.86, 28),
+    new THREE.MeshBasicMaterial({ color:c.col, transparent:true,
+      opacity:0.4, side:THREE.DoubleSide }));
+  ring.rotation.x = -Math.PI/2;
+  ring.position.set(c.x, 0.65, c.z);
+  scene.add(ring);
+});
+
+/* state + UI */
+let day = 0, running = false, showRain = true, totalDrops = 0;
+const DAYS = 365;
+const $ = id => document.getElementById(id);
+
+const schedule = EVENTS.map(e => {
+  const days = [];
+  for (let i=0;i<e.ev;i++){
+    const d = (e.ev >= 12)
+      ? (305 + Math.floor(Math.random()*130)) % 365
+      : Math.floor(Math.random()*365);
+    days.push(d);
+  }
+  return { n:e.n, days, kind:e.kind, ev:e.ev, fired:new Set() };
+});
+
+$('legend').innerHTML = CITIES.map(c =>
+  '<div><span class="dot" style="background:#' +
+  c.col.toString(16).padStart(6,'0') + '"></span>' + c.n +
+  ' <span style="color:#e8f4ff">' + c.mm + 'mm</span></div>').join('');
+
+function updateReadout(){
+  const rows = CITIES.map(c => {
+    const r = rainSystems.find(s => s.city.n === c.n);
+    const got = r ? r.drops : 0;
+    const col = '#' + c.col.toString(16).padStart(6,'0');
+    let note = '';
+    if (c.mm === 0) note = ' <span style="color:#ff4d4d">NO EVENTS *</span>';
+    else if (c.mm <= 2) note = ' <span style="color:#ff8a5c">flash only</span>';
+    return '<div style="font-size:11px"><span style="color:' + col + '">' +
+      c.n.padEnd(11) + '</span>' + String(c.mm).padStart(4) + 'mm ' + note +
+      ' <span style="color:#5b7186">[' + got + ']</span></div>';
+  }).join('');
+  $('stats').innerHTML = '<div style="margin-bottom:6px;font-size:10px;color:var(--dim)">' +
+    'DROP HITS @ DAY ' + Math.floor(day) + '</div>' + rows;
+  const yearly = CITIES.reduce((a,c)=>a+c.mm, 0);
+  $('b1').style.width = Math.min(100, (yearly/(MAX_MM*CITIES.length))*100) + '%';
+  $('range').textContent = 'SUM ' + yearly + ' mm/yr across 7 cities - ' +
+    Math.round((CITIES[6].mm/CITIES[0].mm)*100) + '% of it vs Alexandria';
+}
+
+const clock = new THREE.Clock();
+
+function tick(){
+  const dt = Math.min(clock.getDelta(), 0.05);
+
+  if (running) {
+    day += dt * 42;
+    if (day >= DAYS) {
+      day = 0;
+      schedule.forEach(s => s.fired.clear());
+      rainSystems.forEach(s => s.drops = 0);
+      $('tick').textContent = 'END OF YEAR - new year begins. Forecast: identical.';
+    }
+    schedule.forEach(s => {
+      s.days.forEach((d, idx) => {
+        if (!s.fired.has(idx) && day >= d) {
+          s.fired.add(idx);
+          const sys = rainSystems.find(r => r.city.n === s.n);
+          if (sys) sys.pts.visible = showRain;
+          $('tick').textContent = 'DAY ' + Math.floor(day) + ' - rain event: ' + s.n +
+            (s.kind === 'flash' ? '  TORRENTIAL (annual) ' : '');
+        }
+      });
+    });
+  }
+
+  rainSystems.forEach(sys => {
+    if (!showRain) { sys.pts.visible = false; return; }
+    const p = sys.pos;
+    for (let i=0;i<sys.count;i++){
+      p[i*3+1] -= sys.vel[i] * dt * 2.2;
+      if (p[i*3+1] < 0.6) {
+        if (running) { sys.drops++; totalDrops++; }
+        p[i*3+1] = sys.startY + Math.random()*4;
+        p[i*3]   = sys.x + (Math.random()-0.5)*sys.spread;
+        p[i*3+2] = sys.z + (Math.random()-0.5)*sys.spread;
+      }
+    }
+    sys.attrs.needsUpdate = true;
+    if (sys.kind === 'flash')
+      sys.pts.material.size = 0.16 + Math.sin(performance.now()*0.003)*0.05;
+  });
+
+  if (showRain === false) totalDrops = totalDrops;
+  if (running) updateReadout();
+
+  nileGroup.children.forEach((m,i) => {
+    if (m.material && m.material.emissiveIntensity !== undefined)
+      m.material.emissiveIntensity = 1.1 + Math.sin(performance.now()*0.0012 + i)*0.45;
+  });
+
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(tick);
+}
+
+$('cycle').onclick = () => {
+  running = !running;
+  $('cycle').textContent = running ? 'II Pause Year' : '> Cycle Year';
+  $('cycle').classList.toggle('on', running);
+  if (running) rainSystems.forEach(s => s.pts.visible = showRain);
+  $('tick').textContent = running ? 'Cycling a full year at 42 days/sec...'
+    : 'Paused on day ' + Math.floor(day);
+};
+$('rain').onclick = () => {
+  showRain = !showRain;
+  $('rain').textContent = 'Rain: ' + (showRain ? 'ON' : 'OFF');
+  $('rain').classList.toggle('on', showRain);
+  if (!showRain) rainSystems.forEach(s => s.pts.visible = false);
+};
+$('nile').onclick = () => {
+  nileGroup.visible = !nileGroup.visible;
+  $('nile').textContent = 'Nile: ' + (nileGroup.visible ? 'ON' : 'OFF');
+  $('nile').classList.toggle('on', nileGroup.visible);
+};
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+let autoT = 0;
+(function autoOrbit(){
+  if (!running) {
+    autoT += 0.0018;
+    const r = 34;
+    camera.position.x = Math.sin(autoT*0.6) * r * 0.55;
+    camera.position.z = Math.cos(autoT*0.35) * r * 0.9 + 6;
+    camera.position.y = 22 + Math.sin(autoT)*3;
+    camera.lookAt(0, 1.5, 2);
+  }
+  requestAnimationFrame(autoOrbit);
+})();
+
+updateReadout();
+tick();
+</script>
+</body>
+</html>
