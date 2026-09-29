@@ -100,13 +100,30 @@ const EVENTS = [
 ];
 
 const LON0=24.5, LON1=36.5, LAT0=21.5, LAT1=32.0;
-const W=22, H=13;
+/* ── TRUE-SCALE PROJECTION ─────────────────────────────────────────────
+   Egypt spans 12 deg lon x 10.5 deg lat. At 30N a degree of longitude is
+   only ~96km vs ~111km for latitude, so the real footprint is roughly
+   SQUARE: ~1193km x ~1169km (aspect 1.021).
+
+   Previously W=22, H=13 gave aspect 1.69 — the country was stretched 66%
+   too wide. That smeared the Nile into a hairline and squashed the Delta,
+   which is why the river never read on screen no matter how bright it was.
+   Correct geometry first, aesthetics second. */
+const KM_PER_DEG_LAT = 111.32;
+const LAT_MID = (LAT0 + LAT1) / 2;
+const KM_PER_DEG_LON = KM_PER_DEG_LAT * Math.cos(LAT_MID * Math.PI / 180);
+const SPAN_KM_X = (LON1 - LON0) * KM_PER_DEG_LON;
+const SPAN_KM_Y = (LAT1 - LAT0) * KM_PER_DEG_LAT;
+const W = 22;                                   // scene width (arbitrary)
+const H = W * (SPAN_KM_Y / SPAN_KM_X);          // height locked to reality
+const SCALE = W / SPAN_KM_X;                    // scene units per km
 const px = lon => (lon-LON0)/(LON1-LON0)*W - W/2;
 const pz = lat => -(lat-LAT0)/(LAT1-LAT0)*H + H/2;
+console.log('Egypt aspect fixed:', {W, H: H.toFixed(2), trueAspect: (SPAN_KM_X/SPAN_KM_Y).toFixed(3)});
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x121a2b);
-scene.fog = new THREE.FogExp2(0x2a2a24, 0.009);
+scene.fog = new THREE.FogExp2(0x2a2a24, 0.0055);
 
 /* sky dome: gradient from deep blue up top to dusty horizon at the base */
 {
@@ -128,7 +145,7 @@ scene.fog = new THREE.FogExp2(0x2a2a24, 0.009);
 }
 
 const camera = new THREE.PerspectiveCamera(48, innerWidth/innerHeight, 0.1, 400);
-camera.position.set(0, 26, 26);
+camera.position.set(0, 30, 34);
 
 /* Portrait phones (aspect ~0.45) crush the HORIZONTAL fov when fov is
    applied vertically, leaving dead bands top and bottom. On portrait we
@@ -146,11 +163,11 @@ renderer.toneMappingExposure = 1.15;
 document.body.appendChild(renderer.domElement);
 
 const controls = new OrbitControls(camera, renderer.domElement);
-controls.target.set(0, 0, 2);
+controls.target.set(0, 1.5, 0);
 controls.enableDamping = true;
 controls.dampingFactor = 0.07;
-controls.minDistance = 8;
-controls.maxDistance = 55;
+controls.minDistance = 10;
+controls.maxDistance = 90;
 controls.maxPolarAngle = Math.PI * 0.49;
 
 scene.add(new THREE.HemisphereLight(0xa8dcff, 0x4a3a28, 1.15));
@@ -166,7 +183,7 @@ scene.add(rim);
 
 /* desert ground with dunes */
 {
-  const g = new THREE.PlaneGeometry((W+16)*2.1, (H+16)*2.4, 90, 70);
+  const g = new THREE.PlaneGeometry((W+16)*2.1, (H+16)*2.1, 90, 90);
   const pos = g.attributes.position;
   for (let i=0;i<pos.count;i++){
     const x=pos.getX(i), y=pos.getY(i);
@@ -201,21 +218,35 @@ scene.add(nileGroup);
   ];
   const curve = new THREE.CatmullRomCurve3(pts);
   // fat, bright, slightly raised so it reads from a high camera
+  /* The Nile valley is ~15km wide: 15/1193 = 1.26% of Egypt's width.
+     At true scale that is a 0.277-unit diameter — a hairline. We render it
+     at 3x true width (still only ~3.8% of the country) so it is legible,
+     and lean on EMISSIVE brightness for presence instead of fake bulk. */
+  const NILE_R = 0.20;
+
   const tube = new THREE.Mesh(
-    new THREE.TubeGeometry(curve, 140, 0.62, 12, false),
-    new THREE.MeshStandardMaterial({ color:0x2ec4ff, emissive:0x2ec4ff,
-      emissiveIntensity:2.6, roughness:0.15, metalness:0.1,
+    new THREE.TubeGeometry(curve, 160, NILE_R, 12, false),
+    new THREE.MeshStandardMaterial({ color:0x59d8ff, emissive:0x59d8ff,
+      emissiveIntensity:3.2, roughness:0.1, metalness:0.0,
       transparent:false }));
-  tube.position.y = 0.55;
+  tube.position.y = 0.45;
   nileGroup.add(tube);
 
-  // second, wider glow sheath for bloom-like presence on mobile
+  // additive halo — carries the "a river is here" signal at a glance
   const glow = new THREE.Mesh(
-    new THREE.TubeGeometry(curve, 100, 1.5, 10, false),
+    new THREE.TubeGeometry(curve, 120, NILE_R*2.6, 10, false),
     new THREE.MeshBasicMaterial({ color:0x1a9cff, transparent:true,
-      opacity:0.22, blending:THREE.AdditiveBlending, depthWrite:false }));
-  glow.position.y = 0.55;
+      opacity:0.30, blending:THREE.AdditiveBlending, depthWrite:false }));
+  glow.position.y = 0.45;
   nileGroup.add(glow);
+
+  // a wide, faint bloom bed so it reads at distance without looking like a snake
+  const bed = new THREE.Mesh(
+    new THREE.TubeGeometry(curve, 90, NILE_R*5.5, 8, false),
+    new THREE.MeshBasicMaterial({ color:0x0d6fb8, transparent:true,
+      opacity:0.14, blending:THREE.AdditiveBlending, depthWrite:false }));
+  bed.position.y = 0.40;
+  nileGroup.add(bed);
 
   const delta = new THREE.Mesh(
     new THREE.CircleGeometry(3.4, 6),
@@ -239,7 +270,7 @@ CITIES.forEach(c => {
   const grp = new THREE.Group();
   grp.position.set(x, 0.62, z);
 
-  const h = Math.max(0.35, (c.mm / MAX_MM) * 9);
+  const h = Math.max(0.5, (c.mm / MAX_MM) * 11);
   const pillar = new THREE.Mesh(
     new THREE.CylinderGeometry(0.16, 0.22, h, 10),
     new THREE.MeshStandardMaterial({ color:c.col, emissive:c.col,
@@ -456,11 +487,11 @@ let autoT = 0;
 (function autoOrbit(){
   if (!running) {
     autoT += 0.0018;
-    const r = PORTRAIT ? 30 : 34;
+    const r = PORTRAIT ? 36 : 40;
     camera.position.x = Math.sin(autoT*0.6) * r * 0.55;
     camera.position.z = Math.cos(autoT*0.35) * r * 0.9 + 6;
-    camera.position.y = (PORTRAIT ? 15 : 20) + Math.sin(autoT)*2.5;
-    camera.lookAt(0, PORTRAIT ? 3.5 : 1.5, PORTRAIT ? 1 : 2);
+    camera.position.y = (PORTRAIT ? 26 : 30) + Math.sin(autoT)*2.5;
+    camera.lookAt(0, PORTRAIT ? 2 : 1.5, PORTRAIT ? 0 : 1);
   }
   requestAnimationFrame(autoOrbit);
 })();
