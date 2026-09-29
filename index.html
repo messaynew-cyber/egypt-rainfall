@@ -15,6 +15,17 @@
     flex-direction:column;justify-content:space-between}
   .card{pointer-events:auto;background:var(--panel);border:1px solid var(--line);
     border-radius:14px;padding:12px 14px;backdrop-filter:blur(14px);max-width:560px}
+  @media (orientation:portrait){
+    .hud{padding:10px}
+    .card{padding:9px 11px;border-radius:12px}
+    h1{font-size:12px;margin-bottom:2px}
+    .sub{font-size:10px;line-height:1.35}
+    .readout{margin-top:7px;font-size:10.5px;line-height:1.45}
+    #stats>div{font-size:10px !important}
+    .legend{font-size:9px;line-height:1.8;padding:7px 9px;left:8px;
+      top:auto;bottom:calc(50% + 60px);transform:none}
+    .bar{margin:4px 0 6px;height:6px}
+  }
   h1{margin:0 0 4px;font-size:14px;letter-spacing:.14em;text-transform:uppercase;color:var(--acc)}
   .sub{font-size:11px;color:var(--dim);line-height:1.5}
   .readout{margin-top:10px;font-size:12px;line-height:1.6}
@@ -41,6 +52,7 @@
       <div style="color:var(--dim);font-size:10px" id="range">loading</div>
       <div class="bar"><i id="b1" style="width:0%;background:var(--acc)"></i></div>
       <div id="stats"></div>
+      <button id="tg" style="margin-top:8px;width:100%;padding:6px">Hide Numbers</button>
     </div>
   </div>
   <div class="card">
@@ -93,11 +105,37 @@ const px = lon => (lon-LON0)/(LON1-LON0)*W - W/2;
 const pz = lat => -(lat-LAT0)/(LAT1-LAT0)*H + H/2;
 
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x070b14);
-scene.fog = new THREE.FogExp2(0x1a1712, 0.0125);
+scene.background = new THREE.Color(0x121a2b);
+scene.fog = new THREE.FogExp2(0x2a2a24, 0.009);
+
+/* sky dome: gradient from deep blue up top to dusty horizon at the base */
+{
+  const skyGeo = new THREE.SphereGeometry(180, 32, 24);
+  const skyMat = new THREE.ShaderMaterial({
+    side: THREE.BackSide, depthWrite:false, fog:false,
+    uniforms:{ top:{value:new THREE.Color(0x0a1224)},
+               mid:{value:new THREE.Color(0x24304a)},
+               bot:{value:new THREE.Color(0x6a5540)} },
+    vertexShader:`varying vec3 vP; void main(){ vP = position;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }`,
+    fragmentShader:`varying vec3 vP; uniform vec3 top,mid,bot;
+      void main(){ float h = normalize(vP).y;
+        vec3 c = h > 0.0 ? mix(mid, top, pow(h,0.55))
+                         : mix(mid, bot, pow(-h,0.4));
+        gl_FragColor = vec4(c,1.0); }`
+  });
+  scene.add(new THREE.Mesh(skyGeo, skyMat));
+}
 
 const camera = new THREE.PerspectiveCamera(48, innerWidth/innerHeight, 0.1, 400);
 camera.position.set(0, 26, 26);
+
+/* Portrait phones (aspect ~0.45) crush the HORIZONTAL fov when fov is
+   applied vertically, leaving dead bands top and bottom. On portrait we
+   widen the vertical fov and pull the camera back + lower so the ground
+   plane fills the whole frame instead of a letterbox slot. */
+const PORTRAIT = innerHeight > innerWidth;
+const FIT = PORTRAIT ? 1.55 : 1.0;
 
 const renderer = new THREE.WebGLRenderer({ antialias:true, powerPreference:'high-performance' });
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
@@ -128,7 +166,7 @@ scene.add(rim);
 
 /* desert ground with dunes */
 {
-  const g = new THREE.PlaneGeometry(W+16, H+16, 60, 40);
+  const g = new THREE.PlaneGeometry((W+16)*2.1, (H+16)*2.4, 90, 70);
   const pos = g.attributes.position;
   for (let i=0;i<pos.count;i++){
     const x=pos.getX(i), y=pos.getY(i);
@@ -162,12 +200,22 @@ scene.add(nileGroup);
     new THREE.Vector3(px(31.1), 0.05, pz(31.9))
   ];
   const curve = new THREE.CatmullRomCurve3(pts);
+  // fat, bright, slightly raised so it reads from a high camera
   const tube = new THREE.Mesh(
-    new THREE.TubeGeometry(curve, 120, 0.34, 8, false),
-    new THREE.MeshStandardMaterial({ color:0x1ea5ff, emissive:0x0b6ba8,
-      emissiveIntensity:1.5, roughness:0.25, metalness:0.35,
-      transparent:true, opacity:0.95 }));
+    new THREE.TubeGeometry(curve, 140, 0.62, 12, false),
+    new THREE.MeshStandardMaterial({ color:0x2ec4ff, emissive:0x2ec4ff,
+      emissiveIntensity:2.6, roughness:0.15, metalness:0.1,
+      transparent:false }));
+  tube.position.y = 0.55;
   nileGroup.add(tube);
+
+  // second, wider glow sheath for bloom-like presence on mobile
+  const glow = new THREE.Mesh(
+    new THREE.TubeGeometry(curve, 100, 1.5, 10, false),
+    new THREE.MeshBasicMaterial({ color:0x1a9cff, transparent:true,
+      opacity:0.22, blending:THREE.AdditiveBlending, depthWrite:false }));
+  glow.position.y = 0.55;
+  nileGroup.add(glow);
 
   const delta = new THREE.Mesh(
     new THREE.CircleGeometry(3.4, 6),
@@ -223,7 +271,7 @@ CITIES.forEach(c => {
   tex.minFilter = THREE.LinearFilter;
   const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map:tex,
     transparent:true, depthTest:false }));
-  sp.scale.set(3.1, 0.78, 1);
+  sp.scale.set(PORTRAIT ? 2.6 : 3.1, PORTRAIT ? 0.66 : 0.78, 1);
   sp.position.y = h + 0.75;
   grp.add(sp);
 
@@ -384,6 +432,14 @@ $('rain').onclick = () => {
   $('rain').classList.toggle('on', showRain);
   if (!showRain) rainSystems.forEach(s => s.pts.visible = false);
 };
+let statsOpen = true;
+$('tg').onclick = () => {
+  statsOpen = !statsOpen;
+  $('stats').style.display = statsOpen ? 'block' : 'none';
+  $('b1').parentElement.style.display = statsOpen ? 'block' : 'none';
+  $('range').style.display = statsOpen ? 'block' : 'none';
+  $('tg').textContent = statsOpen ? 'Hide Numbers' : 'Show Numbers';
+};
 $('nile').onclick = () => {
   nileGroup.visible = !nileGroup.visible;
   $('nile').textContent = 'Nile: ' + (nileGroup.visible ? 'ON' : 'OFF');
@@ -400,11 +456,11 @@ let autoT = 0;
 (function autoOrbit(){
   if (!running) {
     autoT += 0.0018;
-    const r = 34;
+    const r = PORTRAIT ? 30 : 34;
     camera.position.x = Math.sin(autoT*0.6) * r * 0.55;
     camera.position.z = Math.cos(autoT*0.35) * r * 0.9 + 6;
-    camera.position.y = 22 + Math.sin(autoT)*3;
-    camera.lookAt(0, 1.5, 2);
+    camera.position.y = (PORTRAIT ? 15 : 20) + Math.sin(autoT)*2.5;
+    camera.lookAt(0, PORTRAIT ? 3.5 : 1.5, PORTRAIT ? 1 : 2);
   }
   requestAnimationFrame(autoOrbit);
 })();
